@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#070b14" />
+  <title>Speaker Tuning — 手機音響皇帝位與低頻駐波調校</title>
+  <link rel="stylesheet" href="./styles/main.css" />
+</head>
+<body>
+  <div class="mobile-shell">
+    <!-- Compact Top Bar -->
+    <header class="topbar">
+      <div class="topbar-brand">
+        <h1>Speaker Tuning</h1>
+        <span class="topbar-sub">Go WASM 聲學調校</span>
+      </div>
+      <span id="wasm-status" class="pill">載入中...</span>
+    </header>
+
+    <div id="error-banner" class="error-banner" role="alert" hidden></div>
+
+    <!-- Segmented Mobile Tab Navigation (4 Tabs) -->
+    <nav class="tab-bar" role="tablist" aria-label="功能切換">
+      <button class="tab-btn" role="tab" aria-selected="true" data-tab="sweetspot">皇帝位</button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="toein">Toe-in</button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="bass">低頻駐波</button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="source">測試音</button>
+    </nav>
+
+    <main class="content-area">
+      <!-- TAB 1: Sweet Spot & Waveforms -->
+      <section class="tab-panel" data-panel="sweetspot">
+        <!-- Tuning Target Toggle: Move Seat vs Fix Seat (Move/Aim Speakers) -->
+        <div class="mode-switch" role="group" aria-label="調校對象模式">
+          <button id="btn-mode-seat" class="mode-btn" aria-pressed="true">🪑 移動座位找皇帝位</button>
+          <button id="btn-mode-speaker" class="mode-btn" aria-pressed="false">🔊 固定座位調喇叭</button>
+        </div>
+
+        <div class="card hero-card">
+          <div class="hero-top">
+            <span id="sweet-spot-badge" class="pill">待命中</span>
+            <span class="muted mono" id="rms-readout">-- dBFS</span>
+          </div>
+          <div id="offset-readout" class="hero-number">-- cm</div>
+          <p id="sweet-spot-hint" class="hero-hint">點擊下方「開始量測」並由音響播放皇帝位測試 WAV</p>
+          <div id="speaker-action-box" class="speaker-guide" hidden></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>皇帝位擺位示意圖</h2>
+            <span id="toe-in-mini" class="pill pill-sm">Toe-in 等待</span>
+          </div>
+          <canvas id="canvas-stage" class="canvas-stage" aria-label="皇帝位與喇叭擺位示意圖"></canvas>
+          <div class="metrics-grid">
+            <div class="metric">
+              <div class="metric-label">到達時間差 (Δt)</div>
+              <div id="delta-ms-readout" class="metric-value">-- ms</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">左右音量差 (L-R)</div>
+              <div id="spl-diff-readout" class="metric-value">-- dB</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">互相關 SNR</div>
+              <div id="snr-readout" class="metric-value">--</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">Toe-in 對稱差</div>
+              <div id="hf-asym-mini" class="metric-value">-- dB</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>左右到達脈衝波型（互相關）</h2>
+          </div>
+          <div class="legend">
+            <span><i class="legend-dot dot-left"></i>左 (L)</span>
+            <span><i class="legend-dot dot-right"></i>右 (R)</span>
+            <span><i class="legend-dot dot-good"></i>0ms 等距</span>
+          </div>
+          <canvas id="canvas-corr" class="canvas-corr" aria-label="左右聲道互相關脈衝重疊波型"></canvas>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>即時收音波型</h2>
+            <span class="muted">AudioWorklet → WASM Worker</span>
+          </div>
+          <canvas id="canvas-wave" class="canvas-wave" aria-label="即時麥克風收音波型"></canvas>
+        </div>
+      </section>
+
+      <!-- TAB 2: Toe-in / Toe-out Tuning -->
+      <section class="tab-panel" data-panel="toein" hidden>
+        <div class="card">
+          <div class="card-head">
+            <h2>Toe-in / Toe-out 角度診斷</h2>
+            <span id="toe-in-badge" class="pill">等待中</span>
+          </div>
+
+          <div id="toe-in-hint" class="hint-box">
+            偵測到左右聲道測試音後，將依據高頻（4k–12kHz）相對於中頻（400–2kHz）的指向性能量提供內傾/外擴建議。
+          </div>
+
+          <div class="metrics-grid">
+            <div class="metric">
+              <div class="metric-label">左高頻亮度 (HF/MF)</div>
+              <div id="hf-left-readout" class="metric-value">-- dB</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">右高頻亮度 (HF/MF)</div>
+              <div id="hf-right-readout" class="metric-value">-- dB</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">左右對稱差 (L-R)</div>
+              <div id="hf-asym-readout" class="metric-value">-- dB</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">直達聲清晰度</div>
+              <div id="clarity-readout" class="metric-value">-- dB</div>
+            </div>
+          </div>
+
+          <div class="stack-btns">
+            <button id="btn-lock-baseline" class="btn btn-primary btn-full" disabled>📌 鎖定目前角度為基準</button>
+            <button id="btn-clear-baseline" class="btn btn-full" disabled>清除角度基準</button>
+          </div>
+
+          <p id="baseline-info" class="muted">
+            未鎖定基準。固定手機於皇帝位後鎖定基準，轉動喇叭即可觀察高頻 ΔdB 變化（找 0° 正對峰值或對稱微 Toe-out）。
+          </p>
+        </div>
+
+        <div class="card">
+          <h2>Toe-in 調整技巧</h2>
+          <ol class="steps-list">
+            <li>將手機<strong>固定放置</strong>在皇帝位（指向正前方兩喇叭中間），量測期間不要移動手機。</li>
+            <li>先調到「左右對稱差」落在 <strong>±1.2 dB 以內</strong>。</li>
+            <li>鎖定基準後，同步將左右喇叭往內轉（Toe-in）：高頻上升代表更對準耳朵，高頻開始下降代表轉過頭。</li>
+            <li>若高音偏亮，可同步微幅外轉（Toe-out）約 -1.0 至 -2.0 dB，保持左右一致即可。</li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- TAB 3: Phase 2 Bass Room Modes -->
+      <section class="tab-panel" data-panel="bass" hidden>
+        <div class="card">
+          <div class="card-head">
+            <h2>低頻駐波量測 (30–320 Hz)</h2>
+            <span id="bass-badge" class="pill">待命中</span>
+          </div>
+
+          <div class="bass-controls">
+            <label class="field-row">
+              <span>喇叭低頻下限 (f_min)</span>
+              <select id="select-bass-fmin" class="select-input">
+                <option value="35">35 Hz（大型落地）</option>
+                <option value="40" selected>40 Hz（MBL 311 C4 推薦）</option>
+                <option value="50">50 Hz（一般書架）</option>
+                <option value="60">60 Hz（小型書架）</option>
+                <option value="80">80 Hz（衛星喇叭）</option>
+              </select>
+            </label>
+
+            <label class="toggle-row">
+              <input id="toggle-bass-detrend" type="checkbox" checked />
+              <span>抗手機 Mic 低頻滾降（去趨勢模式）</span>
+            </label>
+          </div>
+
+          <div class="legend">
+            <span><i class="legend-dot dot-left"></i>即時</span>
+            <span><i class="legend-dot dot-good"></i>快照 A</span>
+            <span><i class="legend-dot dot-right"></i>快照 B</span>
+            <span><i class="legend-dot dot-peak"></i>駐波峰</span>
+            <span><i class="legend-dot dot-null"></i>凹陷</span>
+          </div>
+
+          <canvas id="canvas-bass" class="canvas-bass" aria-label="低頻駐波頻率響應曲線圖"></canvas>
+
+          <div id="bass-hint" class="hint-box">
+            請播放「低頻駐波測試 WAV (30–320 Hz)」並點下方「開始收音量測」，每 5 秒會自動更新一次低頻駐波曲線。
+          </div>
+
+          <div class="metrics-grid">
+            <div class="metric">
+              <div class="metric-label">低頻平坦度 (StdDev)</div>
+              <div id="bass-smooth-readout" class="metric-value">-- dB</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">峰谷最大落差</div>
+              <div id="bass-spread-readout" class="metric-value">-- dB</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">主要駐波峰 (Peak)</div>
+              <div id="bass-peaks-readout" class="metric-value">--</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">主要凹陷 (Null)</div>
+              <div id="bass-nulls-readout" class="metric-value">--</div>
+            </div>
+          </div>
+
+          <div class="snap-row">
+            <button id="btn-snap-a" class="btn" disabled>📸 存位置 A</button>
+            <button id="btn-snap-b" class="btn" disabled>📸 存位置 B</button>
+            <button id="btn-snap-clear" class="btn" disabled>清除</button>
+          </div>
+
+          <p id="snap-compare-info" class="muted">
+            透過同一支手機存「位置 A / B」疊圖對比（例如喇叭離後牆 40cm vs 60cm），可完全抵銷手機麥克風誤差。
+          </p>
+        </div>
+
+        <div class="card">
+          <h2>低頻駐波專用測試音</h2>
+          <div class="stack-btns">
+            <button id="btn-download-bass-wav" class="btn btn-primary btn-full" disabled>⬇ 下載低頻駐波 WAV (30–320Hz)</button>
+            <button id="btn-play-bass-test" class="btn btn-full" disabled>▶ 在本裝置循環播放低頻掃頻</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 4: Test Signal WAVs & Guide -->
+      <section class="tab-panel" data-panel="source" hidden>
+        <div class="card">
+          <h2>1. 皇帝位 &amp; Toe-in 測試音 (300Hz–14kHz)</h2>
+          <p class="muted">
+            1.6 秒循環正交掃頻（左聲道上掃、右聲道下掃），用於尋找皇帝位中軸與調整喇叭 Toe-in。
+          </p>
+          <div class="stack-btns">
+            <button id="btn-download-wav" class="btn btn-primary btn-full" disabled>⬇ 下載皇帝位測試 WAV (24秒循環)</button>
+            <button id="btn-play-test" class="btn btn-full" disabled>▶ 在本裝置循環播放皇帝位測試音</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>2. 低頻駐波測試音 (30Hz–320Hz)</h2>
+          <p class="muted">
+            5.0 秒循環（同步前導音 ＋ 4 秒低頻對數掃頻），L+R 同相輸出以激發真實房間駐波。
+          </p>
+          <div class="stack-btns">
+            <button id="btn-download-bass-wav-2" class="btn btn-primary btn-full" disabled>⬇ 下載低頻駐波 WAV (30秒循環)</button>
+            <button id="btn-play-bass-test-2" class="btn btn-full" disabled>▶ 在本裝置循環播放低頻掃頻</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>手機使用步驟</h2>
+          <ol class="steps-list">
+            <li>依量測項目下載對應的 WAV 檔，交由音響系統<strong>單曲循環播放</strong>。</li>
+            <li>手機以 <strong>Safari (iOS)</strong> 或 <strong>Chrome (Android)</strong> 開啟本頁（勿用 LINE/FB 內建瀏覽器）。</li>
+            <li>切換到對應分頁後，點下方「開始收音量測」即可；切換分頁時 DSP 模式會自動無縫切換。</li>
+          </ol>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Sticky Thumb Action Bar -->
+    <footer class="bottom-bar">
+      <button id="btn-start-mic" class="btn btn-primary bottom-main" disabled>🎙 開始單次量測 (自動停)</button>
+      <button id="btn-stop-mic" class="btn btn-danger bottom-main" hidden disabled>⏹ 停止收音</button>
+      <button id="btn-capture-mode" class="btn bottom-icon" title="切換單次自動停 / 連續即時">單次</button>
+      <button id="btn-quick-wav" class="btn bottom-icon" title="下載目前模式 WAV" disabled>⬇ WAV</button>
+    </footer>
+  </div>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>

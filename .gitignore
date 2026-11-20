@@ -1,0 +1,10 @@
+# Build, packaged binaries & Cloudflare output
+bin/
+dist/
+.wrangler/
+node_modules/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.log

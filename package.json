@@ -1,0 +1,13 @@
+{
+  "name": "speaker-tuning",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Web-based acoustic sweet-spot and speaker toe-in/toe-out tuning tool powered by Go WebAssembly.",
+  "scripts": {
+    "test": "go -C dsp test -v ./...",
+    "build": "node scripts/build.mjs",
+    "dev": "npx wrangler dev",
+    "deploy": "node scripts/build.mjs && npx wrangler deploy"
+  }
+}
