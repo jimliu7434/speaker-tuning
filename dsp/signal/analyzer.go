@@ -69,9 +69,11 @@ type Analyzer struct {
 	ringPos       int
 	totalSamples  int64
 
-	templateLConj []complex128
-	templateRConj []complex128
-	templateNorm  float64
+	templateLConj     []complex128
+	templateRConj     []complex128
+	templateLTdoaConj []complex128 // Bandpass (1.5-12kHz) + Farina whitened analytic template for reflection-immune TDOA
+	templateRTdoaConj []complex128
+	templateNorm      float64
 
 	// Reusable scratch buffers to minimize GC pressure in WASM
 	chronoBuf []float64
@@ -79,8 +81,8 @@ type Analyzer struct {
 	fftWork   []complex128
 	corrL     []float64
 	corrR     []float64
-	envL      []float64
-	envR      []float64
+	tdoaEnvL  []float64
+	tdoaEnvR  []float64
 	specBuf   []complex128
 
 	// Temporal EMA smoothing state for rock-solid mobile readouts
@@ -118,22 +120,46 @@ func NewAnalyzer(sampleRate int) *Analyzer {
 	FFT(bufL, false)
 	FFT(bufR, false)
 
+	conjL := ConjugateCopy(bufL)
+	conjR := ConjugateCopy(bufR)
+
+	// Build bandpass (1.5kHz-12kHz) + Farina-whitened (* f) analytic templates for TDOA.
+	// Eliminates 300-1200Hz room reflections/modes that dominate unwhitened log-chirp correlation
+	// and compresses direct sound into a razor-sharp ~0.1ms needle impulse.
+	tdoaConjL := make([]complex128, analysisFFTSize)
+	tdoaConjR := make([]complex128, analysisFFTSize)
+	halfN := analysisFFTSize / 2
+	binHz := float64(sampleRate) / float64(analysisFFTSize)
+	for k := 1; k < halfN; k++ {
+		freq := float64(k) * binHz
+		bp := tdoaBandpassWeight(freq)
+		if bp <= 0 {
+			continue
+		}
+		// Analytic doubling (2.0) * bandpass * Farina whitening (f / 1000)
+		w := complex(2.0*bp*(freq/1000.0), 0)
+		tdoaConjL[k] = conjL[k] * w
+		tdoaConjR[k] = conjR[k] * w
+	}
+
 	return &Analyzer{
-		sampleRate:    sampleRate,
-		periodSamples: float64(sampleRate) * PeriodSeconds,
-		chirpLen:      len(up),
-		ring:          make([]float64, analysisFFTSize),
-		templateLConj: ConjugateCopy(bufL),
-		templateRConj: ConjugateCopy(bufR),
-		templateNorm:  math.Sqrt(energy),
-		chronoBuf:     make([]float64, analysisFFTSize),
-		fftSignal:     make([]complex128, analysisFFTSize),
-		fftWork:       make([]complex128, analysisFFTSize),
-		corrL:         make([]float64, analysisFFTSize),
-		corrR:         make([]float64, analysisFFTSize),
-		envL:          make([]float64, analysisFFTSize),
-		envR:          make([]float64, analysisFFTSize),
-		specBuf:       make([]complex128, gateFFTSize),
+		sampleRate:        sampleRate,
+		periodSamples:     float64(sampleRate) * PeriodSeconds,
+		chirpLen:          len(up),
+		ring:              make([]float64, analysisFFTSize),
+		templateLConj:     conjL,
+		templateRConj:     conjR,
+		templateLTdoaConj: tdoaConjL,
+		templateRTdoaConj: tdoaConjR,
+		templateNorm:      math.Sqrt(energy),
+		chronoBuf:         make([]float64, analysisFFTSize),
+		fftSignal:         make([]complex128, analysisFFTSize),
+		fftWork:           make([]complex128, analysisFFTSize),
+		corrL:             make([]float64, analysisFFTSize),
+		corrR:             make([]float64, analysisFFTSize),
+		tdoaEnvL:          make([]float64, analysisFFTSize),
+		tdoaEnvR:          make([]float64, analysisFFTSize),
+		specBuf:           make([]complex128, gateFFTSize),
 	}
 }
 
@@ -200,41 +226,50 @@ func (a *Analyzer) Analyze() AnalysisResult {
 	// 2. Forward FFT of input signal
 	FFT(a.fftSignal, false)
 
-	// 3. Analytic matched filter correlation for L (Up-Chirp) and R (Down-Chirp).
-	// Doubling positive frequencies and zeroing negative frequencies yields the exact
-	// real impulse response in real(fftWork) AND its Hilbert envelope in cmplx.Abs(fftWork)
-	// with zero extra FFTs, eliminating carrier sign-flip jitter.
-	halfN := n / 2
-	a.fftWork[0] = a.fftSignal[0] * a.templateLConj[0]
-	for i := 1; i < halfN; i++ {
-		a.fftWork[i] = 2.0 * a.fftSignal[i] * a.templateLConj[i]
-	}
-	a.fftWork[halfN] = a.fftSignal[halfN] * a.templateLConj[halfN]
-	for i := halfN + 1; i < n; i++ {
-		a.fftWork[i] = 0
+	// 3a. Full-band matched filter correlation for L & R (preserved for stable SPL & Toe-in bands)
+	for i := 0; i < n; i++ {
+		a.fftWork[i] = a.fftSignal[i] * a.templateLConj[i]
 	}
 	FFT(a.fftWork, true)
 	for i := 0; i < n; i++ {
 		a.corrL[i] = real(a.fftWork[i]) / a.templateNorm
-		a.envL[i] = cmplx.Abs(a.fftWork[i]) / a.templateNorm
 	}
 
-	a.fftWork[0] = a.fftSignal[0] * a.templateRConj[0]
-	for i := 1; i < halfN; i++ {
-		a.fftWork[i] = 2.0 * a.fftSignal[i] * a.templateRConj[i]
-	}
-	a.fftWork[halfN] = a.fftSignal[halfN] * a.templateRConj[halfN]
-	for i := halfN + 1; i < n; i++ {
-		a.fftWork[i] = 0
+	for i := 0; i < n; i++ {
+		a.fftWork[i] = a.fftSignal[i] * a.templateRConj[i]
 	}
 	FFT(a.fftWork, true)
 	for i := 0; i < n; i++ {
 		a.corrR[i] = real(a.fftWork[i]) / a.templateNorm
-		a.envR[i] = cmplx.Abs(a.fftWork[i]) / a.templateNorm
+	}
+
+	// 3b. High-frequency bandpass (1.5-12kHz) + Farina-whitened analytic envelope for TDOA.
+	// Cuts out 300-1200Hz room reflections/modes and compresses direct sound into a razor-sharp needle.
+	halfN := n / 2
+	for i := 0; i < halfN; i++ {
+		a.fftWork[i] = a.fftSignal[i] * a.templateLTdoaConj[i]
+	}
+	for i := halfN; i < n; i++ {
+		a.fftWork[i] = 0
+	}
+	FFT(a.fftWork, true)
+	for i := 0; i < n; i++ {
+		a.tdoaEnvL[i] = cmplx.Abs(a.fftWork[i]) / a.templateNorm
+	}
+
+	for i := 0; i < halfN; i++ {
+		a.fftWork[i] = a.fftSignal[i] * a.templateRTdoaConj[i]
+	}
+	for i := halfN; i < n; i++ {
+		a.fftWork[i] = 0
+	}
+	FFT(a.fftWork, true)
+	for i := 0; i < n; i++ {
+		a.tdoaEnvR[i] = cmplx.Abs(a.fftWork[i]) / a.templateNorm
 	}
 
 	// 4. Locate up to 2 cycle peaks per channel in safe interior range [margin, n - chirpLen - margin)
-	// using Hilbert envelope + first-arrival direct-sound locking.
+	// using whitened bandpass Hilbert envelope + first-arrival direct-sound locking.
 	margin := int(float64(a.sampleRate) * 0.03) // 30ms safety margin
 	validEnd := n - a.chirpLen - margin
 	if validEnd <= margin {
@@ -242,9 +277,9 @@ func (a *Analyzer) Analyze() AnalysisResult {
 		validEnd = n - a.chirpLen
 	}
 
-	const envSnrThreshold = 8.5 // Equivalent to ~12.0 real-signal SNR
-	peaksL, snrL := findCyclePeaks(a.envL, margin, validEnd, a.periodSamples, a.sampleRate, envSnrThreshold)
-	peaksR, snrR := findCyclePeaks(a.envR, margin, validEnd, a.periodSamples, a.sampleRate, envSnrThreshold)
+	const envSnrThreshold = 8.5
+	peaksL, snrL := findCyclePeaks(a.tdoaEnvL, margin, validEnd, a.periodSamples, a.sampleRate, envSnrThreshold)
+	peaksR, snrR := findCyclePeaks(a.tdoaEnvR, margin, validEnd, a.periodSamples, a.sampleRate, envSnrThreshold)
 	res.SnrL = round2(snrL)
 	res.SnrR = round2(snrR)
 
@@ -427,11 +462,11 @@ func (a *Analyzer) Analyze() AnalysisResult {
 		res.ToeInHint = "右喇叭高頻相對偏暗（-" + formatOneDec(absAsym) + " dB）：建議增加右喇叭 Toe-in（往內轉），或略微減少左喇叭內傾角。"
 	}
 
-	// 9. Build aligned L & R Hilbert correlation envelopes (-12ms .. +12ms)
+	// 9. Build aligned L & R whitened Hilbert correlation envelopes (-12ms .. +12ms)
 	// Center L at idxL, and center R at (idxR - deltaSamples) so R peak visibly shifts by deltaMs!
 	expectedR := int(math.Round(float64(idxR) - deltaSamples))
-	res.CorrEnvL = a.extractCorrEnvelope(a.envL, idxL)
-	res.CorrEnvR = a.extractCorrEnvelope(a.envR, expectedR)
+	res.CorrEnvL = a.extractCorrEnvelope(a.tdoaEnvL, idxL)
+	res.CorrEnvR = a.extractCorrEnvelope(a.tdoaEnvR, expectedR)
 
 	return res
 }
@@ -663,11 +698,33 @@ func findCyclePeaks(env []float64, margin, validEnd int, periodSamples float64, 
 	return peaks, snr
 }
 
-// refineFirstArrival scans up to 12ms before a detected envelope maximum to lock onto
-// the earliest direct-sound arrival when an early room reflection exceeds direct amplitude.
+// tdoaBandpassWeight returns a smooth raised-cosine bandpass weight for 1.5kHz-12kHz,
+// rejecting 300-1200Hz room modes and wall reflections from TDOA peak detection.
+func tdoaBandpassWeight(freq float64) float64 {
+	const (
+		lowCut   = 1200.0
+		lowPass  = 1500.0
+		highPass = 12000.0
+		highCut  = 13500.0
+	)
+	if freq <= lowCut || freq >= highCut {
+		return 0
+	}
+	if freq < lowPass {
+		return 0.5 * (1.0 - math.Cos(math.Pi*(freq-lowCut)/(lowPass-lowCut)))
+	}
+	if freq > highPass {
+		return 0.5 * (1.0 + math.Cos(math.Pi*(freq-highPass)/(highCut-highPass)))
+	}
+	return 1.0
+}
+
+// refineFirstArrival scans up to 15ms before a detected whitened envelope maximum to lock onto
+// the earliest direct-sound leading arrival even when strong wall reflections exceed direct amplitude.
 func refineFirstArrival(env []float64, peakIdx, minIdx int, envRms float64, sampleRate int, snrThreshold float64) int {
-	lookback := int(math.Round(float64(sampleRate) * 0.012)) // 12ms early reflection window
-	minGap := int(math.Round(float64(sampleRate) * 0.0006))  // 0.6ms away from main lobe
+	lookback := int(math.Round(float64(sampleRate) * 0.015)) // 15ms early reflection window
+	minGap := int(math.Round(float64(sampleRate) * 0.0003))  // 0.3ms away from main needle
+	clusterWin := int(math.Round(float64(sampleRate) * 0.0004))
 	start := peakIdx - lookback
 	if start < minIdx+1 {
 		start = minIdx + 1
@@ -677,11 +734,24 @@ func refineFirstArrival(env []float64, peakIdx, minIdx int, envRms float64, samp
 		return peakIdx
 	}
 
-	thresh := math.Max(env[peakIdx]*0.45, envRms*snrThreshold)
+	thresh := math.Max(env[peakIdx]*0.30, envRms*snrThreshold)
 	for i := start; i <= end; i++ {
 		v := env[i]
 		if v >= thresh && v >= env[i-1] && v >= env[i+1] {
-			return i
+			// Take the highest point within this direct-arrival cluster (+0.4ms)
+			bestIdx := i
+			bestVal := v
+			limit := i + clusterWin
+			if limit > end {
+				limit = end
+			}
+			for j := i + 1; j <= limit; j++ {
+				if env[j] > bestVal {
+					bestVal = env[j]
+					bestIdx = j
+				}
+			}
+			return bestIdx
 		}
 	}
 	return peakIdx
