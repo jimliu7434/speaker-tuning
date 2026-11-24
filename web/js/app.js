@@ -74,7 +74,7 @@ let bassDetrended = true;
 
 // One-shot round accumulator state
 const ONE_SHOT_CONFIG = {
-  sweetspot: { targetRounds: 4, minIntervalMs: 1550 },
+  sweetspot: { targetRounds: 4, minIntervalMs: 1600 },
   bass: { targetRounds: 2, minIntervalMs: 4800 },
 };
 let oneShotSamples = [];
@@ -257,7 +257,7 @@ async function requestTestWavBuffer(kind = 'sweetspot') {
     requestId,
     kind,
     sampleRate: 48000,
-    loops: kind === 'bass' ? 6 : 15,
+    loops: kind === 'bass' ? 6 : 60,
   });
   return promise;
 }
@@ -448,41 +448,76 @@ function meanOf(arr, selector) {
   return arr.reduce((sum, item) => sum + selector(item), 0) / arr.length;
 }
 
+function medianOf(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) * 0.5
+    : sorted[mid];
+}
+
 function averageSweetSpotResults(samples) {
-  const last = structuredClone(samples.at(-1));
-  last.deltaMs = Math.round(meanOf(samples, (s) => s.deltaMs) * 1000) / 1000;
-  last.offsetCm = Math.round(meanOf(samples, (s) => s.offsetCm) * 100) / 100;
-  last.splDiffDb = Math.round(meanOf(samples, (s) => s.splDiffDb) * 100) / 100;
-  last.hfRatioL = Math.round(meanOf(samples, (s) => s.hfRatioL) * 100) / 100;
-  last.hfRatioR = Math.round(meanOf(samples, (s) => s.hfRatioR) * 100) / 100;
-  last.toeInAsymDb = Math.round(meanOf(samples, (s) => s.toeInAsymDb) * 100) / 100;
-  last.clarityL = Math.round(meanOf(samples, (s) => s.clarityL) * 100) / 100;
-  last.clarityR = Math.round(meanOf(samples, (s) => s.clarityR) * 100) / 100;
+  const rawOf = (s, rawKey, fallbackKey) => (
+    typeof s[rawKey] === 'number' ? s[rawKey] : s[fallbackKey]
+  );
+
+  const allDeltas = samples.map((s) => rawOf(s, 'rawDeltaMs', 'deltaMs'));
+  const medDelta = medianOf(allDeltas);
+
+  // Reject outlier rounds deviating > 0.6ms from the median
+  const inliers = samples.filter((s) => Math.abs(rawOf(s, 'rawDeltaMs', 'deltaMs') - medDelta) <= 0.6);
+  const used = inliers.length >= 2 ? inliers : samples;
+
+  const usedDeltas = used.map((s) => rawOf(s, 'rawDeltaMs', 'deltaMs'));
+  const spreadMs = Math.max(...usedDeltas) - Math.min(...usedDeltas);
+  const unstable = inliers.length < 2 || spreadMs > 0.8;
+
+  const last = structuredClone(used.at(-1));
+  last.deltaMs = Math.round(meanOf(used, (s) => rawOf(s, 'rawDeltaMs', 'deltaMs')) * 1000) / 1000;
+  last.offsetCm = Math.round(meanOf(used, (s) => rawOf(s, 'rawOffsetCm', 'offsetCm')) * 100) / 100;
+  last.splDiffDb = Math.round(meanOf(used, (s) => rawOf(s, 'rawSplDiffDb', 'splDiffDb')) * 100) / 100;
+  last.hfRatioL = Math.round(meanOf(used, (s) => rawOf(s, 'rawHfRatioL', 'hfRatioL')) * 100) / 100;
+  last.hfRatioR = Math.round(meanOf(used, (s) => rawOf(s, 'rawHfRatioR', 'hfRatioR')) * 100) / 100;
+  last.toeInAsymDb = Math.round(meanOf(used, (s) => rawOf(s, 'rawToeInAsymDb', 'toeInAsymDb')) * 100) / 100;
+  last.clarityL = Math.round(meanOf(used, (s) => rawOf(s, 'rawClarityL', 'clarityL')) * 100) / 100;
+  last.clarityR = Math.round(meanOf(used, (s) => rawOf(s, 'rawClarityR', 'clarityR')) * 100) / 100;
+
+  last.lockedRounds = used.length;
+  last.totalRounds = samples.length;
+  last.spreadMs = Math.round(spreadMs * 1000) / 1000;
+  last.unstable = unstable;
+  last.roundDeltasMs = allDeltas.map((v) => Math.round(v * 100) / 100);
 
   const absCm = Math.abs(last.offsetCm);
-  if (absCm <= 1.5) {
+  const stabilityTag = unstable
+    ? `⚠ 波動過大 ±${(spreadMs * 0.5).toFixed(2)} ms`
+    : `${used.length}/${samples.length} 輪有效，穩定度 ±${(spreadMs * 0.5).toFixed(2)} ms`;
+
+  if (unstable) {
+    last.sweetSpotStatus = 'waiting';
+    last.sweetSpotHint = `量測波動過大（各輪 Δt: ${last.roundDeltasMs.join(', ')} ms），請保持手機完全靜止、確認音量足夠後重測，切勿依此調整 DSP。`;
+  } else if (absCm <= 1.5) {
     last.sweetSpotStatus = 'centered';
-    last.sweetSpotHint = `量測完成（${samples.length} 輪平均）：您目前正處於左右等距的皇帝位中軸線上。`;
+    last.sweetSpotHint = `量測完成（${stabilityTag}）：您目前正處於左右等距的皇帝位中軸線上。`;
   } else if (last.offsetCm > 0) {
     last.sweetSpotStatus = 'move_right';
-    last.sweetSpotHint = `量測完成（${samples.length} 輪平均）：位置偏左，請往右移動約 ${absCm.toFixed(1)} cm。`;
+    last.sweetSpotHint = `量測完成（${stabilityTag}）：位置偏左，請往右移動約 ${absCm.toFixed(1)} cm。`;
   } else {
     last.sweetSpotStatus = 'move_left';
-    last.sweetSpotHint = `量測完成（${samples.length} 輪平均）：位置偏右，請往左移動約 ${absCm.toFixed(1)} cm。`;
+    last.sweetSpotHint = `量測完成（${stabilityTag}）：位置偏右，請往左移動約 ${absCm.toFixed(1)} cm。`;
   }
 
   const absAsym = Math.abs(last.toeInAsymDb);
   if (absAsym <= 1.2) {
     last.toeInStatus = 'balanced';
-    last.toeInHint = `量測完成（${samples.length} 輪平均）：左右喇叭高頻指向性對稱良好（差異 ${absAsym.toFixed(1)} dB）。`;
+    last.toeInHint = `量測完成（${used.length} 輪平均）：左右喇叭高頻指向性對稱良好（差異 ${absAsym.toFixed(1)} dB）。`;
   } else if (last.toeInAsymDb < 0) {
     last.toeInStatus = 'toe_in_left';
-    last.toeInHint = `量測完成（${samples.length} 輪平均）：左喇叭高頻偏暗（-${absAsym.toFixed(1)} dB），建議增加左喇叭 Toe-in。`;
+    last.toeInHint = `量測完成（${used.length} 輪平均）：左喇叭高頻偏暗（-${absAsym.toFixed(1)} dB），建議增加左喇叭 Toe-in。`;
   } else {
     last.toeInStatus = 'toe_in_right';
-    last.toeInHint = `量測完成（${samples.length} 輪平均）：右喇叭高頻偏暗（-${absAsym.toFixed(1)} dB），建議增加右喇叭 Toe-in。`;
+    last.toeInHint = `量測完成（${used.length} 輪平均）：右喇叭高頻偏暗（-${absAsym.toFixed(1)} dB），建議增加右喇叭 Toe-in。`;
   }
-  last.lockedRounds = samples.length;
   return last;
 }
 
@@ -529,7 +564,9 @@ function handleSweetSpotFrame(data) {
       latestResult = averaged;
       stopMeasurement().then(() => {
         renderAnalysis(latestResult);
-        el.sweetSpotBadge.textContent = `✓ 已鎖定 (${averaged.lockedRounds}輪平均)`;
+        el.sweetSpotBadge.textContent = averaged.unstable
+          ? `⚠ 波動過大 (±${(averaged.spreadMs * 0.5).toFixed(2)}ms)`
+          : `✓ 已鎖定 (${averaged.lockedRounds}/${averaged.totalRounds}輪 ±${(averaged.spreadMs * 0.5).toFixed(2)}ms)`;
         el.btnLockBaseline.disabled = false;
       });
     }
@@ -608,7 +645,11 @@ function renderAnalysis(data) {
 
     if (tuningMode === 'speaker') {
       // Fixed Seat Mode: tell user how to move/aim speakers to bring sweet spot to their seat
-      if (data.sweetSpotStatus === 'centered') {
+      if (data.unstable) {
+        el.sweetSpotBadge.textContent = '⚠ 延遲波動過大，請重測';
+        el.offsetReadout.textContent = '請重測';
+        el.sweetSpotHint.textContent = data.sweetSpotHint;
+      } else if (data.sweetSpotStatus === 'centered') {
         el.sweetSpotBadge.textContent = '喇叭距離已等距 ✓';
         el.offsetReadout.textContent = `✓ 等距 (${absCm} cm)`;
         el.sweetSpotHint.textContent = '左右喇叭到您目前座位的距離已平衡！';
@@ -624,12 +665,14 @@ function renderAnalysis(data) {
         el.sweetSpotHint.textContent = `座位偏右：將左喇叭往前拉 ${absCm} cm（或右退 ${halfCm} + 左進 ${halfCm} cm）`;
       }
 
-      // 3-step actionable speaker adjustment card (Distance + Angle + Balance)
-      const distAdvice = data.sweetSpotStatus === 'centered'
-        ? '已等距 ✓（不需移動前後位置）'
-        : data.offsetCm > 0
-          ? `右喇叭往前移 ${absCm} cm（或左後退）；若不能移動，可用擴大機/DAC 延遲左聲道 ${Math.abs(data.deltaMs).toFixed(2)} ms`
-          : `左喇叭往前移 ${absCm} cm（或右後退）；若不能移動，可用擴大機/DAC 延遲右聲道 ${Math.abs(data.deltaMs).toFixed(2)} ms`;
+      // 3-step actionable speaker adjustment card (Distance + Angle + Balance + Stability)
+      const distAdvice = data.unstable
+        ? '本輪各次 Δt 差距過大，請勿依此調整 DSP Delay，請保持手機不動並重測'
+        : data.sweetSpotStatus === 'centered'
+          ? '已等距 ✓（不需移動前後位置）'
+          : data.offsetCm > 0
+            ? `右喇叭往前移 ${absCm} cm（或左後退）；若不能移動，可用擴大機/DAC/Roon DSP 延遲左聲道 ${Math.abs(data.deltaMs).toFixed(2)} ms`
+            : `左喇叭往前移 ${absCm} cm（或右後退）；若不能移動，可用擴大機/DAC/Roon DSP 延遲右聲道 ${Math.abs(data.deltaMs).toFixed(2)} ms`;
 
       const angleAdvice = data.toeInStatus === 'balanced'
         ? '左右高頻指向已對準您的座位 ✓'
@@ -644,15 +687,26 @@ function renderAnalysis(data) {
           ? `左聲道偏大 +${absSpl.toFixed(1)} dB：擴大機 Balance 略往右補，或將左喇叭稍微外轉（Toe-out）減弱直吹`
           : `右聲道偏大 +${absSpl.toFixed(1)} dB：擴大機 Balance 略往左補，或將右喇叭稍微外轉（Toe-out）減弱直吹`;
 
-      el.speakerActionBox.hidden = false;
-      el.speakerActionBox.replaceChildren(
+      const guideRows = [
         buildSpeakerGuideRow('1. 距離', distAdvice),
         buildSpeakerGuideRow('2. 角度', angleAdvice),
         buildSpeakerGuideRow('3. 音量', balanceAdvice),
-      );
+      ];
+      if (Array.isArray(data.roundDeltasMs) && data.roundDeltasMs.length > 0) {
+        const roundsStr = data.roundDeltasMs.map((v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}`).join(' / ');
+        const stabText = data.unstable
+          ? `⚠ 各輪 Δt: [${roundsStr}] ms（誤差 ±${(data.spreadMs * 0.5).toFixed(2)} ms）`
+          : `✓ ${data.lockedRounds}/${data.totalRounds} 輪有效，誤差 ±${(data.spreadMs * 0.5).toFixed(2)} ms（各輪: ${roundsStr} ms）`;
+        guideRows.push(buildSpeakerGuideRow('4. 穩定度', stabText));
+      }
+
+      el.speakerActionBox.hidden = false;
+      el.speakerActionBox.replaceChildren(...guideRows);
     } else {
       el.speakerActionBox.hidden = true;
-      if (data.sweetSpotStatus === 'centered') {
+      if (data.unstable) {
+        el.offsetReadout.textContent = '請重測';
+      } else if (data.sweetSpotStatus === 'centered') {
         el.offsetReadout.textContent = `✓ ${absCm} cm`;
       } else if (data.offsetCm > 0) {
         el.offsetReadout.textContent = `往右 ${absCm} cm →`;

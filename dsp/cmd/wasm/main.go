@@ -83,7 +83,7 @@ func dspAnalyze(_ js.Value, _ []js.Value) any {
 
 func dspGenerateTestWav(_ js.Value, args []js.Value) any {
 	sr := signal.DefaultSampleRate
-	loops := 15
+	loops := 60
 	if len(args) > 0 && args[0].Type() == js.TypeNumber {
 		sr = args[0].Int()
 	}

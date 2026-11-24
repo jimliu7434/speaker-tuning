@@ -30,7 +30,11 @@ function copyDir(src, dst) {
 
 console.log('[1/5] Preparing output directories...');
 ensureDir(binDir);
-fs.rmSync(distDir, { recursive: true, force: true });
+try {
+  fs.rmSync(distDir, { recursive: true, force: true });
+} catch {
+  // Fallback to in-place overwrite if dist/ directory handle is locked on Windows
+}
 ensureDir(distWasmDir);
 
 console.log('[2/5] Building Go WASM (bin/dsp.wasm)...');
@@ -54,7 +58,7 @@ execFileSync('go', ['build', '-ldflags=-s -w', '-o', cliOut, './cmd/genwav'], {
 
 console.log('[4/5] Generating default test WAVs (sweetspot + bass)...');
 const wavOut = path.join(binDir, 'speaker-tuning-test-48k.wav');
-execFileSync(cliOut, ['-mode', 'sweetspot', '-out', wavOut, '-rate', '48000', '-loops', '15'], {
+execFileSync(cliOut, ['-mode', 'sweetspot', '-out', wavOut, '-rate', '48000', '-loops', '60'], {
   cwd: rootDir,
   stdio: 'inherit',
 });

@@ -144,3 +144,114 @@ func TestToeInStabilityWithRoomEchoAndSlidingWindow(t *testing.T) {
 		t.Fatalf("expected at least 5 detected frames, got %d", checked)
 	}
 }
+
+func TestLoopGapRejected(t *testing.T) {
+	const sr = 48000
+	a := NewAnalyzer(sr)
+	periodSamples := int(math.Round(float64(sr) * PeriodSeconds))
+	halfPeriod := periodSamples / 2
+	up := GenerateLogChirp(sr, true)
+	down := GenerateLogChirp(sr, false)
+
+	// Build a 2.8s window containing cycle 1, then a 120ms player loop gap, then cycle 2
+	gapSamples := int(math.Round(float64(sr) * 0.120))
+	total := int(float64(sr) * 2.85)
+	buf := make([]float32, total)
+
+	c1 := 3000
+	c2 := c1 + periodSamples + gapSamples
+	for _, start := range []int{c1, c2} {
+		for i, v := range up {
+			if start+i < total {
+				buf[start+i] += float32(v * 0.5)
+			}
+		}
+		rStart := start + halfPeriod
+		for i, v := range down {
+			if rStart+i < total {
+				buf[rStart+i] += float32(v * 0.5)
+			}
+		}
+	}
+
+	a.PushSamples(buf)
+	res := a.Analyze()
+	if res.Detected {
+		t.Fatalf("expected loop-gap frame to be rejected, but got detected=true deltaMs=%.3f", res.RawDeltaMs)
+	}
+}
+
+func TestClockDriftSelfCalibration(t *testing.T) {
+	const sr = 48000
+	a := NewAnalyzer(sr)
+	// Simulate +300 ppm clock drift between player DAC and phone mic:
+	// nominal period 1.60s becomes 1.60048s (+0.48ms per period).
+	driftedPeriod := int(math.Round(float64(sr) * PeriodSeconds * 1.0003))
+	driftedHalf := driftedPeriod / 2
+	up := GenerateLogChirp(sr, true)
+	down := GenerateLogChirp(sr, false)
+
+	total := int(float64(sr) * 2.85)
+	buf := make([]float32, total)
+	for start := 4000; start < total; start += driftedPeriod {
+		for i, v := range up {
+			if start+i < total {
+				buf[start+i] += float32(v * 0.5)
+			}
+		}
+		rStart := start + driftedHalf
+		for i, v := range down {
+			if rStart+i < total {
+				buf[rStart+i] += float32(v * 0.5)
+			}
+		}
+	}
+
+	a.PushSamples(buf)
+	res := a.Analyze()
+	if !res.Detected {
+		t.Fatalf("expected signal detected under +300ppm clock drift")
+	}
+	if math.Abs(res.RawDeltaMs) > 0.05 {
+		t.Fatalf("expected self-calibrated deltaMs near 0ms, got %.3f ms (measuredPeriod=%.3f ms)", res.RawDeltaMs, res.MeasuredPeriodMs)
+	}
+}
+
+func TestFirstArrivalLocksDirectSoundOverStrongReflection(t *testing.T) {
+	const sr = 48000
+	a := NewAnalyzer(sr)
+	periodSamples := int(math.Round(float64(sr) * PeriodSeconds))
+	halfPeriod := periodSamples / 2
+	up := GenerateLogChirp(sr, true)
+	down := GenerateLogChirp(sr, false)
+
+	// R has a strong inverted early reflection (+3.0ms, 1.15x amplitude) simulating desk/wall bounce
+	reflDelay := int(math.Round(float64(sr) * 0.003))
+	total := int(float64(sr) * 2.85)
+	buf := make([]float32, total)
+	for start := 4000; start < total; start += periodSamples {
+		for i, v := range up {
+			if start+i < total {
+				buf[start+i] += float32(v * 0.5)
+			}
+		}
+		rStart := start + halfPeriod
+		for i, v := range down {
+			if rStart+i < total {
+				buf[rStart+i] += float32(v * 0.5)
+			}
+			if rStart+reflDelay+i < total {
+				buf[rStart+reflDelay+i] -= float32(v * 0.58)
+			}
+		}
+	}
+
+	a.PushSamples(buf)
+	res := a.Analyze()
+	if !res.Detected {
+		t.Fatalf("expected signal detected")
+	}
+	if math.Abs(res.RawDeltaMs) > 0.15 {
+		t.Fatalf("expected first-arrival to lock direct sound (~0ms), not +3ms reflection; got %.3f ms", res.RawDeltaMs)
+	}
+}

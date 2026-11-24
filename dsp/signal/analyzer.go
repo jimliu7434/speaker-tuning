@@ -15,33 +15,49 @@ const (
 
 // AnalysisResult holds all acoustic diagnostics returned to the frontend UI.
 type AnalysisResult struct {
-	Ready           bool      `json:"ready"`
-	Detected        bool      `json:"detected"`
-	SampleRate      int       `json:"sampleRate"`
-	InputRmsDb      float64   `json:"inputRmsDb"`
-	SnrL            float64   `json:"snrL"`
-	SnrR            float64   `json:"snrR"`
-	DeltaMs         float64   `json:"deltaMs"`         // >0: R arrives later (listener too far Left -> move Right)
-	OffsetCm        float64   `json:"offsetCm"`        // Equivalent lateral shift in cm (+ move Right, - move Left)
-	SplL            float64   `json:"splL"`            // Relative dBFS of L chirp
-	SplR            float64   `json:"splR"`            // Relative dBFS of R chirp
-	SplDiffDb       float64   `json:"splDiffDb"`       // splL - splR
-	MidL            float64   `json:"midL"`            // 400-2000 Hz dB
-	MidR            float64   `json:"midR"`
-	HighL           float64   `json:"highL"`           // 4000-12000 Hz dB
-	HighR           float64   `json:"highR"`
-	HfRatioL        float64   `json:"hfRatioL"`        // HighL - MidL (brightness / on-axis indicator)
-	HfRatioR        float64   `json:"hfRatioR"`        // HighR - MidR
-	ToeInAsymDb     float64   `json:"toeInAsymDb"`     // HfRatioL - HfRatioR
-	ClarityL        float64   `json:"clarityL"`        // Direct vs Early Reflection ratio (dB)
-	ClarityR        float64   `json:"clarityR"`
-	SweetSpotStatus string    `json:"sweetSpotStatus"` // "buffering" | "waiting" | "centered" | "move_right" | "move_left"
-	SweetSpotHint   string    `json:"sweetSpotHint"`
-	ToeInStatus     string    `json:"toeInStatus"`     // "waiting" | "balanced" | "toe_in_left" | "toe_in_right"
-	ToeInHint       string    `json:"toeInHint"`
-	Waveform        []float64 `json:"waveform"`        // Downsampled recent mic waveform [-1, 1]
-	CorrEnvL        []float64 `json:"corrEnvL"`        // Normalized L correlation envelope [-12ms..+12ms]
-	CorrEnvR        []float64 `json:"corrEnvR"`        // Normalized R correlation envelope [-12ms..+12ms] aligned to expected R
+	Ready            bool      `json:"ready"`
+	Detected         bool      `json:"detected"`
+	CycleValid       bool      `json:"cycleValid"`
+	SampleRate       int       `json:"sampleRate"`
+	MeasuredPeriodMs float64   `json:"measuredPeriodMs"`
+	InputRmsDb       float64   `json:"inputRmsDb"`
+	SnrL             float64   `json:"snrL"`
+	SnrR             float64   `json:"snrR"`
+	DeltaMs          float64   `json:"deltaMs"`         // >0: R arrives later (listener too far Left -> move Right)
+	OffsetCm         float64   `json:"offsetCm"`        // Equivalent lateral shift in cm (+ move Right, - move Left)
+	RawDeltaMs       float64   `json:"rawDeltaMs"`      // Unsmoothed single-frame deltaMs (used by one-shot median)
+	RawOffsetCm      float64   `json:"rawOffsetCm"`     // Unsmoothed single-frame offsetCm
+	SplL             float64   `json:"splL"`            // Relative dBFS of L chirp
+	SplR             float64   `json:"splR"`            // Relative dBFS of R chirp
+	SplDiffDb        float64   `json:"splDiffDb"`       // splL - splR
+	RawSplDiffDb     float64   `json:"rawSplDiffDb"`    // Unsmoothed single-frame splDiffDb
+	MidL             float64   `json:"midL"`            // 400-2000 Hz dB
+	MidR             float64   `json:"midR"`
+	HighL            float64   `json:"highL"`           // 4000-12000 Hz dB
+	HighR            float64   `json:"highR"`
+	HfRatioL         float64   `json:"hfRatioL"`        // HighL - MidL (brightness / on-axis indicator)
+	HfRatioR         float64   `json:"hfRatioR"`        // HighR - MidR
+	RawHfRatioL      float64   `json:"rawHfRatioL"`     // Unsmoothed single-frame hfRatioL
+	RawHfRatioR      float64   `json:"rawHfRatioR"`     // Unsmoothed single-frame hfRatioR
+	ToeInAsymDb      float64   `json:"toeInAsymDb"`     // HfRatioL - HfRatioR
+	RawToeInAsymDb   float64   `json:"rawToeInAsymDb"`  // Unsmoothed single-frame toeInAsymDb
+	ClarityL         float64   `json:"clarityL"`        // Direct vs Early Reflection ratio (dB)
+	ClarityR         float64   `json:"clarityR"`
+	RawClarityL      float64   `json:"rawClarityL"`     // Unsmoothed single-frame clarityL
+	RawClarityR      float64   `json:"rawClarityR"`     // Unsmoothed single-frame clarityR
+	SweetSpotStatus  string    `json:"sweetSpotStatus"` // "buffering" | "waiting" | "centered" | "move_right" | "move_left"
+	SweetSpotHint    string    `json:"sweetSpotHint"`
+	ToeInStatus      string    `json:"toeInStatus"`     // "waiting" | "balanced" | "toe_in_left" | "toe_in_right"
+	ToeInHint        string    `json:"toeInHint"`
+	Waveform         []float64 `json:"waveform"`        // Downsampled recent mic waveform [-1, 1]
+	CorrEnvL         []float64 `json:"corrEnvL"`        // Normalized L correlation envelope [-12ms..+12ms]
+	CorrEnvR         []float64 `json:"corrEnvR"`        // Normalized R correlation envelope [-12ms..+12ms] aligned to expected R
+}
+
+type peakCandidate struct {
+	idx int
+	pos float64
+	val float64
 }
 
 // Analyzer maintains a ring buffer and precomputed chirp templates for fast DSP.
@@ -63,6 +79,8 @@ type Analyzer struct {
 	fftWork   []complex128
 	corrL     []float64
 	corrR     []float64
+	envL      []float64
+	envR      []float64
 	specBuf   []complex128
 
 	// Temporal EMA smoothing state for rock-solid mobile readouts
@@ -113,6 +131,8 @@ func NewAnalyzer(sampleRate int) *Analyzer {
 		fftWork:       make([]complex128, analysisFFTSize),
 		corrL:         make([]float64, analysisFFTSize),
 		corrR:         make([]float64, analysisFFTSize),
+		envL:          make([]float64, analysisFFTSize),
+		envR:          make([]float64, analysisFFTSize),
 		specBuf:       make([]complex128, gateFFTSize),
 	}
 }
@@ -153,7 +173,9 @@ func (a *Analyzer) Analyze() AnalysisResult {
 	// Build recent ~60ms live waveform preview regardless of buffering state
 	res.Waveform, res.InputRmsDb = a.buildWaveformPreview()
 
-	minSamples := int64(math.Round(float64(a.sampleRate) * 1.85))
+	// Require a full ring buffer (~2.73s @ 48kHz) so every analyzed window contains
+	// complete chirp cycles with zero unfilled padding and allows cycle-period verification.
+	minSamples := int64(analysisFFTSize)
 	if a.totalSamples < minSamples {
 		return res
 	}
@@ -178,40 +200,55 @@ func (a *Analyzer) Analyze() AnalysisResult {
 	// 2. Forward FFT of input signal
 	FFT(a.fftSignal, false)
 
-	// 3. Matched filter correlation for L (Up-Chirp) and R (Down-Chirp)
-	for i := 0; i < n; i++ {
-		a.fftWork[i] = a.fftSignal[i] * a.templateLConj[i]
+	// 3. Analytic matched filter correlation for L (Up-Chirp) and R (Down-Chirp).
+	// Doubling positive frequencies and zeroing negative frequencies yields the exact
+	// real impulse response in real(fftWork) AND its Hilbert envelope in cmplx.Abs(fftWork)
+	// with zero extra FFTs, eliminating carrier sign-flip jitter.
+	halfN := n / 2
+	a.fftWork[0] = a.fftSignal[0] * a.templateLConj[0]
+	for i := 1; i < halfN; i++ {
+		a.fftWork[i] = 2.0 * a.fftSignal[i] * a.templateLConj[i]
+	}
+	a.fftWork[halfN] = a.fftSignal[halfN] * a.templateLConj[halfN]
+	for i := halfN + 1; i < n; i++ {
+		a.fftWork[i] = 0
 	}
 	FFT(a.fftWork, true)
 	for i := 0; i < n; i++ {
 		a.corrL[i] = real(a.fftWork[i]) / a.templateNorm
+		a.envL[i] = cmplx.Abs(a.fftWork[i]) / a.templateNorm
 	}
 
-	for i := 0; i < n; i++ {
-		a.fftWork[i] = a.fftSignal[i] * a.templateRConj[i]
+	a.fftWork[0] = a.fftSignal[0] * a.templateRConj[0]
+	for i := 1; i < halfN; i++ {
+		a.fftWork[i] = 2.0 * a.fftSignal[i] * a.templateRConj[i]
+	}
+	a.fftWork[halfN] = a.fftSignal[halfN] * a.templateRConj[halfN]
+	for i := halfN + 1; i < n; i++ {
+		a.fftWork[i] = 0
 	}
 	FFT(a.fftWork, true)
 	for i := 0; i < n; i++ {
 		a.corrR[i] = real(a.fftWork[i]) / a.templateNorm
+		a.envR[i] = cmplx.Abs(a.fftWork[i]) / a.templateNorm
 	}
 
-	// 4. Locate strongest peaks in safe interior range [margin, n - chirpLen - margin)
-	// Margin guarantees full direct sound + early reflection gate without edge wrap-around.
+	// 4. Locate up to 2 cycle peaks per channel in safe interior range [margin, n - chirpLen - margin)
+	// using Hilbert envelope + first-arrival direct-sound locking.
 	margin := int(float64(a.sampleRate) * 0.03) // 30ms safety margin
 	validEnd := n - a.chirpLen - margin
 	if validEnd <= margin {
 		margin = 0
 		validEnd = n - a.chirpLen
 	}
-	relL, snrL := findPeakAndSNR(a.corrL[margin:validEnd])
-	relR, snrR := findPeakAndSNR(a.corrR[margin:validEnd])
-	idxL := margin + relL
-	idxR := margin + relR
+
+	const envSnrThreshold = 8.5 // Equivalent to ~12.0 real-signal SNR
+	peaksL, snrL := findCyclePeaks(a.envL, margin, validEnd, a.periodSamples, a.sampleRate, envSnrThreshold)
+	peaksR, snrR := findCyclePeaks(a.envR, margin, validEnd, a.periodSamples, a.sampleRate, envSnrThreshold)
 	res.SnrL = round2(snrL)
 	res.SnrR = round2(snrR)
 
-	const snrThreshold = 6.0
-	if snrL < snrThreshold || snrR < snrThreshold {
+	if len(peaksL) == 0 || len(peaksR) == 0 {
 		a.hasEma = false
 		res.SweetSpotStatus = "waiting"
 		res.SweetSpotHint = "尚未偵測到標準測試音，請播放測試 WAV 檔並調適音量。"
@@ -220,21 +257,89 @@ func (a *Analyzer) Analyze() AnalysisResult {
 		return res
 	}
 
+	// 5. Cycle integrity verification & clock-drift self-calibration.
+	// If two consecutive peaks of the same channel are present, their spacing MUST match
+	// nominal 1.60s within ±4ms; otherwise a player loop-gap or audio frame drop occurred.
+	maxPeriodErr := float64(a.sampleRate) * 0.004 // ±4ms (±2500 ppm)
+	measuredPeriodSum := 0.0
+	measuredPeriodCnt := 0
+
+	if len(peaksL) >= 2 {
+		dL := peaksL[1].pos - peaksL[0].pos
+		if math.Abs(dL-a.periodSamples) > maxPeriodErr {
+			res.SweetSpotStatus = "waiting"
+			res.SweetSpotHint = "偵測到播放循環接縫或音訊掉幀，自動略過本幀..."
+			res.ToeInStatus = "waiting"
+			res.ToeInHint = "等待穩定週期訊號..."
+			return res
+		}
+		measuredPeriodSum += dL
+		measuredPeriodCnt++
+	}
+	if len(peaksR) >= 2 {
+		dR := peaksR[1].pos - peaksR[0].pos
+		if math.Abs(dR-a.periodSamples) > maxPeriodErr {
+			res.SweetSpotStatus = "waiting"
+			res.SweetSpotHint = "偵測到播放循環接縫或音訊掉幀，自動略過本幀..."
+			res.ToeInStatus = "waiting"
+			res.ToeInHint = "等待穩定週期訊號..."
+			return res
+		}
+		measuredPeriodSum += dR
+		measuredPeriodCnt++
+	}
+
+	actualPeriod := a.periodSamples
+	if measuredPeriodCnt > 0 {
+		actualPeriod = measuredPeriodSum / float64(measuredPeriodCnt)
+	}
+	res.MeasuredPeriodMs = round3(actualPeriod / float64(a.sampleRate) * 1000.0)
+	halfPeriod := actualPeriod * 0.5
+
+	// 6. Select the closest adjacent (L, R) pair to avoid cross-cycle pairing,
+	// and verify consistency if multiple complete pairs exist in the window.
+	bestL := peaksL[0]
+	bestR := peaksR[0]
+	bestDist := math.Inf(1)
+	for _, pL := range peaksL {
+		for _, pR := range peaksR {
+			dist := math.Abs(math.Abs(pR.pos-pL.pos) - halfPeriod)
+			if dist < bestDist {
+				bestDist = dist
+				bestL = pL
+				bestR = pR
+			}
+		}
+	}
+
+	if len(peaksL) >= 2 && len(peaksR) >= 2 {
+		d0 := wrapSigned((peaksR[0].pos-peaksL[0].pos)-halfPeriod, actualPeriod)
+		d1 := wrapSigned((peaksR[1].pos-peaksL[1].pos)-halfPeriod, actualPeriod)
+		if math.Abs(d1-d0) > float64(a.sampleRate)*0.002 {
+			res.SweetSpotStatus = "waiting"
+			res.SweetSpotHint = "偵測到前後輪延遲不一致（可能遇循環接縫或雜訊），自動略過本幀..."
+			res.ToeInStatus = "waiting"
+			res.ToeInHint = "等待穩定週期訊號..."
+			return res
+		}
+	}
+
+	idxL := bestL.idx
+	idxR := bestR.idx
+	peakL := bestL.pos
+	peakR := bestR.pos
+
 	res.Detected = true
+	res.CycleValid = true
 
-	// 5. Sub-sample parabolic interpolation around peak magnitude
-	peakL := parabolicPeak(a.corrL, idxL)
-	peakR := parabolicPeak(a.corrR, idxR)
-
-	// 6. TDOA calculation: expected R arrives exactly halfPeriod after L (modulo periodSamples)
-	halfPeriod := a.periodSamples * 0.5
+	// 7. TDOA calculation using clock-drift-calibrated halfPeriod
 	rawDiff := peakR - peakL
-	deltaSamples := wrapSigned(rawDiff-halfPeriod, a.periodSamples)
+	deltaSamples := wrapSigned(rawDiff-halfPeriod, actualPeriod)
 	deltaSec := deltaSamples / float64(a.sampleRate)
 	rawDeltaMs := deltaSec * 1000.0
 	rawOffsetCm := deltaSec * SpeedOfSound * 100.0
 
-	// 7. Quasi-anechoic time-gated impulse response spectral analysis
+	// 8. Quasi-anechoic time-gated impulse response spectral analysis
 	// Measuring directly from the compressed impulse peak [idx-3ms, idx+9ms] eliminates
 	// Up-Chirp vs Down-Chirp edge clipping and gates out late room reverberation.
 	splL, midL, highL := a.measureGatedBands(a.corrL, idxL)
@@ -247,7 +352,17 @@ func (a *Analyzer) Analyze() AnalysisResult {
 	rawClarityL := a.measureClarity(a.corrL, idxL)
 	rawClarityR := a.measureClarity(a.corrR, idxR)
 
-	// Apply gentle EMA smoothing (alpha = 0.35) so live mobile readouts stay steady
+	// Expose unsmoothed single-frame values for one-shot median/outlier filtering
+	res.RawDeltaMs = round3(rawDeltaMs)
+	res.RawOffsetCm = round2(rawOffsetCm)
+	res.RawSplDiffDb = round2(rawSplDiff)
+	res.RawHfRatioL = round2(rawHfRatioL)
+	res.RawHfRatioR = round2(rawHfRatioR)
+	res.RawToeInAsymDb = round2(rawToeInAsym)
+	res.RawClarityL = round2(rawClarityL)
+	res.RawClarityR = round2(rawClarityR)
+
+	// Apply gentle EMA smoothing (alpha = 0.35) for continuous live mode
 	const alpha = 0.35
 	if !a.hasEma {
 		a.hasEma = true
@@ -312,11 +427,11 @@ func (a *Analyzer) Analyze() AnalysisResult {
 		res.ToeInHint = "右喇叭高頻相對偏暗（-" + formatOneDec(absAsym) + " dB）：建議增加右喇叭 Toe-in（往內轉），或略微減少左喇叭內傾角。"
 	}
 
-	// 8. Build aligned L & R correlation envelopes (-12ms .. +12ms)
+	// 9. Build aligned L & R Hilbert correlation envelopes (-12ms .. +12ms)
 	// Center L at idxL, and center R at (idxR - deltaSamples) so R peak visibly shifts by deltaMs!
 	expectedR := int(math.Round(float64(idxR) - deltaSamples))
-	res.CorrEnvL = a.extractCorrEnvelope(a.corrL, idxL)
-	res.CorrEnvR = a.extractCorrEnvelope(a.corrR, expectedR)
+	res.CorrEnvL = a.extractCorrEnvelope(a.envL, idxL)
+	res.CorrEnvR = a.extractCorrEnvelope(a.envR, expectedR)
 
 	return res
 }
@@ -481,6 +596,95 @@ func (a *Analyzer) extractCorrEnvelope(corr []float64, centerIdx int) []float64 
 		out[p] = round4(out[p] / maxVal)
 	}
 	return out
+}
+
+// findCyclePeaks locates up to 2 distinct cycle peaks in the Hilbert envelope within
+// [margin, validEnd), applying first-arrival refinement so early room reflections
+// cannot hijack the direct-sound timestamp.
+func findCyclePeaks(env []float64, margin, validEnd int, periodSamples float64, sampleRate int, snrThreshold float64) ([]peakCandidate, float64) {
+	if validEnd <= margin {
+		return nil, 0
+	}
+
+	sumSq := 0.0
+	maxIdx := margin
+	maxVal := 0.0
+	for i := margin; i < validEnd; i++ {
+		v := env[i]
+		sumSq += v * v
+		if v > maxVal {
+			maxVal = v
+			maxIdx = i
+		}
+	}
+	rms := math.Sqrt(sumSq / float64(validEnd-margin))
+	if rms < 1e-12 {
+		return nil, 0
+	}
+	snr := maxVal / rms
+	if snr < snrThreshold {
+		return nil, snr
+	}
+
+	p1Idx := refineFirstArrival(env, maxIdx, margin, rms, sampleRate, snrThreshold)
+	peaks := make([]peakCandidate, 0, 2)
+	peaks = append(peaks, peakCandidate{
+		idx: p1Idx,
+		pos: parabolicPeak(env, p1Idx),
+		val: env[p1Idx],
+	})
+
+	// Search for a second cycle peak separated by at least 0.55 * periodSamples (~0.88s)
+	exclude := int(math.Round(periodSamples * 0.55))
+	secondIdx := -1
+	secondVal := 0.0
+	for i := margin; i < validEnd; i++ {
+		if i >= maxIdx-exclude && i <= maxIdx+exclude {
+			continue
+		}
+		v := env[i]
+		if v > secondVal {
+			secondVal = v
+			secondIdx = i
+		}
+	}
+	if secondIdx >= 0 && secondVal >= maxVal*0.45 && secondVal/rms >= snrThreshold {
+		p2Idx := refineFirstArrival(env, secondIdx, margin, rms, sampleRate, snrThreshold)
+		peaks = append(peaks, peakCandidate{
+			idx: p2Idx,
+			pos: parabolicPeak(env, p2Idx),
+			val: env[p2Idx],
+		})
+	}
+
+	if len(peaks) == 2 && peaks[1].idx < peaks[0].idx {
+		peaks[0], peaks[1] = peaks[1], peaks[0]
+	}
+	return peaks, snr
+}
+
+// refineFirstArrival scans up to 12ms before a detected envelope maximum to lock onto
+// the earliest direct-sound arrival when an early room reflection exceeds direct amplitude.
+func refineFirstArrival(env []float64, peakIdx, minIdx int, envRms float64, sampleRate int, snrThreshold float64) int {
+	lookback := int(math.Round(float64(sampleRate) * 0.012)) // 12ms early reflection window
+	minGap := int(math.Round(float64(sampleRate) * 0.0006))  // 0.6ms away from main lobe
+	start := peakIdx - lookback
+	if start < minIdx+1 {
+		start = minIdx + 1
+	}
+	end := peakIdx - minGap
+	if end <= start {
+		return peakIdx
+	}
+
+	thresh := math.Max(env[peakIdx]*0.45, envRms*snrThreshold)
+	for i := start; i <= end; i++ {
+		v := env[i]
+		if v >= thresh && v >= env[i-1] && v >= env[i+1] {
+			return i
+		}
+	}
+	return peakIdx
 }
 
 func findPeakAndSNR(corr []float64) (int, float64) {

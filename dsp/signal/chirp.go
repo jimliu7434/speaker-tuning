@@ -63,7 +63,7 @@ func GenerateTestWAV(sampleRate int, loops int) []byte {
 		sampleRate = DefaultSampleRate
 	}
 	if loops <= 0 {
-		loops = 15
+		loops = 60
 	}
 
 	periodSamples := int(math.Round(float64(sampleRate) * PeriodSeconds))

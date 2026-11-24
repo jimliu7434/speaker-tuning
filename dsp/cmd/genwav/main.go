@@ -13,7 +13,7 @@ func main() {
 	mode := flag.String("mode", "sweetspot", "Signal mode: 'sweetspot' (L/R chirp) or 'bass' (30-320Hz room mode sweep)")
 	outPath := flag.String("out", "speaker-tuning-test.wav", "Output WAV file path")
 	sampleRate := flag.Int("rate", signal.DefaultSampleRate, "Sample rate in Hz")
-	loops := flag.Int("loops", 0, "Number of cycles (default: 15 for sweetspot, 6 for bass)")
+	loops := flag.Int("loops", 0, "Number of cycles (default: 60 for sweetspot, 6 for bass)")
 	flag.Parse()
 
 	var wav []byte
@@ -25,7 +25,7 @@ func main() {
 		wav = signal.GenerateBassTestWAV(*sampleRate, usedLoops)
 	} else {
 		if usedLoops <= 0 {
-			usedLoops = 15
+			usedLoops = 60
 		}
 		wav = signal.GenerateTestWAV(*sampleRate, usedLoops)
 	}
